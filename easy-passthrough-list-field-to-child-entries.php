@@ -22,17 +22,33 @@
  * 1. Install the snippet. See "Where do I put snippets?" in our documentation for installation instructions.
  *
  * 2. Configure the snippet based on inline instructions.
+ *
+ * 3. To populate multiple Nested Form fields (on the same form or different forms), add a separate configuration
+ *    block for each List field => Nested Form field pairing.
  */
 class GPEP_List_Field_To_Child_Entries {
 
 	private $args;
+
+	private static $is_cleanup_registered = false;
 
 	public function __construct( $args ) {
 		$this->args = $args;
 		add_filter( 'gform_register_init_scripts_' . $args['target_form_id'], array( $this, 'register_init_script' ), 20 );
 		add_action( 'wp_ajax_gpep_list_to_child_entries', array( $this, 'ajax_populate_child_entries' ) );
 		add_action( 'wp_ajax_nopriv_gpep_list_to_child_entries', array( $this, 'ajax_populate_child_entries' ) );
-		add_action( 'gpep_ltce_import_marker_cleanup', array( $this, 'cleanup_import_marker' ) );
+		// The cleanup is shared by all instances, so only register it once.
+		if ( ! self::$is_cleanup_registered ) {
+			add_action( 'gpep_ltce_import_marker_cleanup', array( $this, 'cleanup_import_marker' ) );
+			self::$is_cleanup_registered = true;
+		}
+	}
+
+	/**
+	 * Identifies this configuration so multiple instances can run on the same site, or the same form, independently.
+	 */
+	public function get_instance_hash() {
+		return wp_hash( wp_json_encode( $this->args ) );
 	}
 
 	private function save_import_marker( $key, $state ) {
@@ -77,13 +93,15 @@ class GPEP_List_Field_To_Child_Entries {
 			'url'     => admin_url( 'admin-ajax.php' ),
 			'nonce'   => wp_create_nonce( 'gpep_list_to_child_entries_' . $form['id'] ),
 			'param'   => $param,
+			'hash'    => $this->get_instance_hash(),
 		);
 		// Read the bearer token from the current URL in JS, never print it into cached HTML.
-		$script = 'window.gpepListToChildEntriesConfig = ' . wp_json_encode( $config ) . ';' . <<<'JS'
+		$script = <<<'JS'
 (function ($, config) {
 	var form = document.getElementById('gform_' + config.formId);
-	if (!form || form.dataset.childEntriesImportBound) { return; }
-	form.dataset.childEntriesImportBound = '1';
+	var boundKey = 'childEntriesImportBound' + config.fieldId;
+	if (!form || form.dataset[boundKey]) { return; }
+	form.dataset[boundKey] = '1';
 	var token = new URL(window.location.href).searchParams.get(config.param);
 	if (!token) { return; }
 	var busy = true, started = false;
@@ -112,7 +130,7 @@ class GPEP_List_Field_To_Child_Entries {
 		$.ajax({
 			url: config.url, method: 'POST', timeout: 30000,
 			data: {
-				action: 'gpep_list_to_child_entries', nonce: config.nonce, token: token,
+				action: 'gpep_list_to_child_entries', instance: config.hash, nonce: config.nonce, token: token,
 				gpnf_context: window['GPNestedForms_' + config.formId + '_' + config.fieldId].ajaxContext
 			}
 		}).done(function (response) {
@@ -143,12 +161,17 @@ class GPEP_List_Field_To_Child_Entries {
 		if (Number(instance.formId) === config.formId) { waitForSession(); }
 	});
 	waitForSession();
-})(jQuery, window.gpepListToChildEntriesConfig);
+})(jQuery,
 JS;
-		GFFormDisplay::add_init_script( $form['id'], 'gpep_list_to_child_entries', GFFormDisplay::ON_PAGE_RENDER, $script );
+		$script .= ' ' . wp_json_encode( $config ) . ');';
+		GFFormDisplay::add_init_script( $form['id'], 'gpep_list_to_child_entries_' . $this->get_instance_hash(), GFFormDisplay::ON_PAGE_RENDER, $script );
 	}
 
 	public function ajax_populate_child_entries() {
+		// Every instance listens for this action. Only handle requests from this instance's configuration.
+		if ( rgpost( 'instance' ) !== $this->get_instance_hash() ) {
+			return;
+		}
 		if ( ! $this->is_configured() ) {
 			wp_send_json_error( array( 'message' => 'The child entry importer is not configured.' ), 400 );
 		}
@@ -304,3 +327,16 @@ new GPEP_List_Field_To_Child_Entries( array(
 		2 => 4,
 	),
 ) );
+
+// To populate another Nested Form field, add another configuration block. For example:
+// new GPEP_List_Field_To_Child_Entries( array(
+// 	'source_form_id'  => 128,
+// 	'target_form_id'  => 130,
+// 	'list_field_id'   => 2,
+// 	'nested_field_id' => 3,
+// 	'max_rows'        => 10,
+// 	'column_map'      => array(
+// 		0 => 1,
+// 		1 => 2,
+// 	),
+// ) );
