@@ -15,7 +15,10 @@
  * Requirements:
  *  * GP Easy Passthrough and GP Nested Forms (with sessions enabled).
  *  * The source List field must have "Enable multiple columns" checked.
- *  * Mapped child form fields must be Single Line Text, Number, or Hidden fields.
+ *  * Mapped child form fields must be Single Line Text, Number, or Hidden fields, or Address field inputs.
+ *    Map Address fields by input ID: 5.1 (Street), 5.2 (Line 2), 5.3 (City), 5.4 (State), 5.5 (ZIP), 5.6 (Country),
+ *    where 5 is the Address field ID. If the State or Country input is a drop-down, List values must match its
+ *    choices exactly (e.g. "Connecticut", not "CT").
  *
  * Instructions:
  *
@@ -232,9 +235,18 @@ JS;
 			return new WP_Error( 'list', 'Check the source List field configuration.' );
 		}
 		foreach ( $this->args['column_map'] as $column => $child_field_id ) {
+			// GFFormsModel::get_field() returns the parent field for an input ID (e.g. 5.3 returns field 5).
 			$child_field = GFFormsModel::get_field( $child_form, $child_field_id );
-			if ( ! isset( $list->choices[ $column ] ) || ! $child_field || ! in_array( $child_field->get_input_type(), array( 'text', 'number', 'hidden' ), true ) ) {
-				return new WP_Error( 'map', 'Map each List column to a Single Line Text, Number, or Hidden field in the child form.' );
+			$input_type  = $child_field ? $child_field->get_input_type() : '';
+			if ( $input_type === 'address' ) {
+				// Address fields must be mapped to a specific input (e.g. 5.3 for City), not the field as a whole.
+				$input_ids = array_map( 'strval', wp_list_pluck( (array) $child_field->inputs, 'id' ) );
+				$is_valid  = in_array( (string) $child_field_id, $input_ids, true );
+			} else {
+				$is_valid = in_array( $input_type, array( 'text', 'number', 'hidden' ), true );
+			}
+			if ( ! isset( $list->choices[ $column ] ) || ! $is_valid ) {
+				return new WP_Error( 'map', 'Map each List column to a Single Line Text, Number, or Hidden field, or to an Address field input (e.g. 5.3), in the child form.' );
 			}
 		}
 		$raw  = rgar( $source, $list->id );
@@ -343,5 +355,9 @@ new GPEP_List_Field_To_Child_Entries( array(
 // 	'column_map'      => array(
 // 		0 => 1,
 // 		1 => 2,
+// 		2 => '5.1', // Address Street
+// 		3 => '5.3', // Address City
+// 		4 => '5.4', // Address State
+// 		5 => '5.5', // Address ZIP
 // 	),
 // ) );
