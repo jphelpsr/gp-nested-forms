@@ -321,10 +321,15 @@ new GPEP_List_Field_To_Child_Entries( array(
 	'nested_field_id' => 1,   // Update "1" to the ID of the Nested Form field on the target form.
 	'max_rows'        => 10,  // Maximum number of List rows that will be imported.
 	'column_map'      => array(
-		// List column index (starting at 0) => child form field ID
-		0 => 1,
-		1 => 3,
-		2 => 4,
+		// List column index (starting at 0) => child form field ID, or Address input ID in quotes (e.g. '5.3')
+		0 => 1,     // Year       => child form field 1
+		1 => 3,     // Make       => child form field 3
+		2 => 4,     // Length     => child form field 4
+		3 => '5.1', // Address 1  => Address Street
+		4 => '5.2', // Address 2  => Address Line 2
+		5 => '5.3', // City       => Address City
+		6 => '5.4', // State      => Address State
+		7 => '5.5', // Zip        => Address ZIP
 	),
 ) );
 
