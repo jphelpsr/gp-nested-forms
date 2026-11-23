@@ -15,10 +15,14 @@
  * Requirements:
  *  * GP Easy Passthrough and GP Nested Forms (with sessions enabled).
  *  * The source List field must have "Enable multiple columns" checked.
- *  * Mapped child form fields must be Single Line Text, Number, or Hidden fields, or Address field inputs.
- *    Map Address fields by input ID: 5.1 (Street), 5.2 (Line 2), 5.3 (City), 5.4 (State), 5.5 (ZIP), 5.6 (Country),
- *    where 5 is the Address field ID. If the State or Country input is a drop-down, List values must match its
- *    choices exactly (e.g. "Connecticut", not "CT").
+ *  * Mapped child form fields must be Single Line Text, Paragraph Text, Number, Hidden, or Date fields, or Address
+ *    field inputs. Map Address fields by input ID: 5.1 (Street), 5.2 (Line 2), 5.3 (City), 5.4 (State), 5.5 (ZIP),
+ *    5.6 (Country), where 5 is the Address field ID. If the State or Country input is a drop-down, List values must
+ *    match its choices exactly (e.g. "Connecticut", not "CT").
+ *  * Date fields accept List values in mm/dd/yyyy or mm/dd/yy format (also with - or . separators) or yyyy-mm-dd.
+ *    Values that cannot be read as a valid date are left blank for the user to fill in.
+ *  * Calculated fields on the child form are not run when child entries are imported. They are calculated when the
+ *    user opens and saves each child entry.
  *
  * Instructions:
  *
@@ -73,6 +77,14 @@ class GPEP_List_Field_To_Child_Entries {
 		} else {
 			delete_option( $key );
 		}
+	}
+
+	/**
+	 * Reads a value from the Nested Forms session cookie, the same way Gravity Wiz's own Nested Forms snippets do.
+	 */
+	private function get_session_value( $session, $key ) {
+		$cookie = $session->get_cookie();
+		return is_array( $cookie ) ? rgar( $cookie, $key ) : null;
 	}
 
 	private function is_configured() {
@@ -185,7 +197,7 @@ JS;
 			wp_send_json_error( array( 'message' => 'This link is not valid for the previous entry.' ), 403 );
 		}
 		$session = new GPNF_Session( $this->args['target_form_id'] );
-		$hash    = $session->get( 'hash' );
+		$hash    = $this->get_session_value( $session, 'hash' );
 		if ( ! is_string( $hash ) || ! $hash || is_numeric( $hash ) ) {
 			wp_send_json_error( array( 'message' => 'The Nested Forms session is unavailable. Enable cookies and try again.' ), 400 );
 		}
@@ -224,7 +236,7 @@ JS;
 			$this->save_import_marker( $key, $state );
 			return $this->prepare_child_entries_for_display( $state['ids'], $session, $child_form );
 		}
-		$existing = $session->get( 'nested_entries' );
+		$existing = $this->get_session_value( $session, 'nested_entries' );
 		if ( ! empty( $existing[ $field->id ] ) ) {
 			// Never merge into or overwrite an existing draft's child entries.
 			$this->save_import_marker( $key, array( 'source' => $source['id'], 'ids' => array() ) );
@@ -234,6 +246,7 @@ JS;
 		if ( ! $list || $list->type !== 'list' || ! $list->enableColumns ) {
 			return new WP_Error( 'list', 'Check the source List field configuration.' );
 		}
+		$field_types = array();
 		foreach ( $this->args['column_map'] as $column => $child_field_id ) {
 			// GFFormsModel::get_field() returns the parent field for an input ID (e.g. 5.3 returns field 5).
 			$child_field = GFFormsModel::get_field( $child_form, $child_field_id );
@@ -243,11 +256,12 @@ JS;
 				$input_ids = array_map( 'strval', wp_list_pluck( (array) $child_field->inputs, 'id' ) );
 				$is_valid  = in_array( (string) $child_field_id, $input_ids, true );
 			} else {
-				$is_valid = in_array( $input_type, array( 'text', 'number', 'hidden' ), true );
+				$is_valid = in_array( $input_type, array( 'text', 'textarea', 'number', 'hidden', 'date' ), true );
 			}
 			if ( ! isset( $list->choices[ $column ] ) || ! $is_valid ) {
-				return new WP_Error( 'map', 'Map each List column to a Single Line Text, Number, or Hidden field, or to an Address field input (e.g. 5.3), in the child form.' );
+				return new WP_Error( 'map', 'Map each List column to a Single Line Text, Paragraph Text, Number, Hidden, or Date field, or to an Address field input (e.g. 5.3), in the child form.' );
 			}
+			$field_types[ (string) $child_field_id ] = $input_type;
 		}
 		$raw  = rgar( $source, $list->id );
 		$rows = $raw === '' || $raw === null ? array() : GFCommon::maybe_unserialize( $raw );
@@ -265,7 +279,11 @@ JS;
 				if ( ! is_scalar( $cells[ $column ] ) && $cells[ $column ] !== null ) {
 					return new WP_Error( 'cell', 'An unsupported value was found in the source List field.' );
 				}
-				$entry[ (string) $child_field_id ] = trim( (string) $cells[ $column ] );
+				$value = trim( (string) $cells[ $column ] );
+				if ( $field_types[ (string) $child_field_id ] === 'date' ) {
+					$value = $this->format_date( $value );
+				}
+				$entry[ (string) $child_field_id ] = $value;
 			}
 			// Preserve a literal zero; skip only completely blank mapped rows.
 			$values = array_intersect_key( $entry, array_flip( array_map( 'strval', array_values( $this->args['column_map'] ) ) ) );
@@ -287,7 +305,7 @@ JS;
 			}
 			$ids[] = $id;
 			$child = new GPNF_Entry( $id );
-			$child->set_parent_meta( $this->args['target_form_id'], $session->get( 'hash' ) );
+			$child->set_parent_meta( $this->args['target_form_id'], $this->get_session_value( $session, 'hash' ) );
 			$child->set_nested_form_field( $field->id );
 			$child->set_expiration();
 		}
@@ -295,15 +313,37 @@ JS;
 		return $this->prepare_child_entries_for_display( $ids, $session, $child_form );
 	}
 
+	/**
+	 * Converts a List value to the Y-m-d format Gravity Forms uses to store Date field values.
+	 * Accepts mm/dd/yyyy, mm/dd/yy (with /, - or . separators) and yyyy-mm-dd. Returns '' if the value is not a valid date.
+	 */
+	private function format_date( $value ) {
+		if ( $value === '' ) {
+			return '';
+		}
+		if ( preg_match( '/^(\d{4})-(\d{1,2})-(\d{1,2})$/', $value, $m ) ) {
+			list( , $year, $month, $day ) = array_map( 'intval', $m );
+		} elseif ( preg_match( '/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/', $value, $m ) ) {
+			list( , $month, $day, $year ) = array_map( 'intval', $m );
+			if ( strlen( $m[3] ) === 2 ) {
+				// Two-digit years later than the current year are treated as 19xx (e.g. birthdays).
+				$year += $year > (int) gmdate( 'y' ) ? 1900 : 2000;
+			}
+		} else {
+			return '';
+		}
+		return checkdate( $month, $day, $year ) ? sprintf( '%04d-%02d-%02d', $year, $month, $day ) : '';
+	}
+
 	private function prepare_child_entries_for_display( $ids, $session, $child_form ) {
 		$result      = array();
-		$current     = $session->get( 'nested_entries' );
+		$current     = $this->get_session_value( $session, 'nested_entries' );
 		$current_ids = isset( $current[ $this->args['nested_field_id'] ] ) ? $current[ $this->args['nested_field_id'] ] : array();
 		foreach ( $ids as $id ) {
 			$entry = GFAPI::get_entry( $id );
 			if ( is_wp_error( $entry ) || $entry['status'] !== 'active'
 				|| (int) $entry['form_id'] !== (int) $child_form['id']
-				|| (string) gform_get_meta( $id, GPNF_Entry::ENTRY_PARENT_KEY ) !== $session->get( 'hash' )
+				|| (string) gform_get_meta( $id, GPNF_Entry::ENTRY_PARENT_KEY ) !== $this->get_session_value( $session, 'hash' )
 				|| (int) gform_get_meta( $id, GPNF_Entry::ENTRY_NESTED_FORM_FIELD_KEY ) !== (int) $this->args['nested_field_id'] ) {
 				continue;
 			}
